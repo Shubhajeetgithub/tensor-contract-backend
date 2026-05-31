@@ -77,8 +77,9 @@ R4 = Tensor(R4_data, [upper(:ρ), lower(:μ), lower(:σ), lower(:ν)], :R4)
 v  = Tensor([1.0, 2.0, 1.0, 3.0], [upper(:μ)], :v)
 ns = Dict(:g => g, :v => v, :R => R, :R4 => R4)
 
-println("Example 1:  v_ν = g_{μν} v^μ   (lower a vector)")
-r1 = tensor_assign("v_ν = g{_μ _ν} v{^μ}", ns)
+# println("Example 1:  v_ν = g_{μν} v^μ   (lower a vector)")
+# r1 = tensor_assign("v_ν = g{_μ _ν} v{^μ}", ns)
+r1 = tensor_assign("v_ν = v{_μ}", ns)
 println(r1)
 
 println()

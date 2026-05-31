@@ -5,6 +5,7 @@ using .TensorOps
 using .StandardTensors
 using HTTP
 using JSON
+using Logging
 
 function get_metric(metric_type::String, params::Any)
     if metric_type == "minkowski"
@@ -94,137 +95,155 @@ function get_metric(metric_type::String, params::Any)
     end
 end
 
+# Simple warning logger that collects messages into a Vector{String}
+struct CollectingLogger <: AbstractLogger
+    warnings::Vector{String}
+    min_level::LogLevel
+end
+CollectingLogger(warnings) = CollectingLogger(warnings, Logging.Warn)
+Logging.shouldlog(l::CollectingLogger, level, _module, group, id) = level >= l.min_level
+Logging.min_enabled_level(l::CollectingLogger) = l.min_level
+Logging.catch_exceptions(l::CollectingLogger) = false
+function Logging.handle_message(l::CollectingLogger, level, message, _module, group, id, file, line; kwargs...)
+    push!(l.warnings, string(message))
+end
+
 function handle_compute(req::HTTP.Request)
+    captured_warnings = String[]
+    cl = CollectingLogger(captured_warnings)
+
     try
-        req_data = JSON.parse(String(req.body))
-        metric_type = get(req_data, "metric", "minkowski")
-        params = get(req_data, "params", Dict())
-        coords = Float64.(get(req_data, "coords", [0.0, 0.0, 0.0, 0.0]))
-        coord_names = String.(get(req_data, "coord_names", ["t", "r", "\\theta", "\\phi"]))
-        expr = get(req_data, "expression", "")
-        custom_vectors = get(req_data, "vectors", Dict())
+        local response
+        with_logger(cl) do
+            req_data = JSON.parse(String(req.body))
+            metric_type = get(req_data, "metric", "minkowski")
+            params = get(req_data, "params", Dict())
+            coords = Float64.(get(req_data, "coords", [0.0, 0.0, 0.0, 0.0]))
+            coord_names = String.(get(req_data, "coord_names", ["t", "r", "\\theta", "\\phi"]))
+            expr = get(req_data, "expression", "")
+            custom_vectors = get(req_data, "vectors", Dict())
 
-        # Construct metric
-        g_fn = get_metric(metric_type, params)
-        g_data = g_fn(coords)
-        
-        # Build baseline tensors
-        g_tensor = Tensor(g_data, [lower(:μ), lower(:ν)], :g)
-        ig_tensor = metric_inverse(g_data)
-        ig_tensor = Tensor(ig_tensor.data, [upper(:μ), upper(:ν)], :ig)
+            # Construct metric
+            g_fn = get_metric(metric_type, params)
+            g_data = g_fn(coords)
+            
+            # Build baseline tensors
+            g_tensor = Tensor(g_data, [lower(:μ), lower(:ν)], :g)
+            ig_tensor = metric_inverse(g_data)
+            ig_tensor = Tensor(ig_tensor.data, [upper(:μ), upper(:ν)], :ig)
 
-        Γ_tensor = christoffel_symbols(g_fn, coords)
-        R_tensor = riemann_tensor(g_fn, coords)
-        Ric_tensor = ricci_tensor(g_fn, coords)
-        G_tensor = einstein_tensor(g_fn, coords)
+            Γ_tensor = christoffel_symbols(g_fn, coords)
+            R_tensor = riemann_tensor(g_fn, coords)
+            Ric_tensor = ricci_tensor(g_fn, coords)
+            G_tensor = einstein_tensor(g_fn, coords)
 
-        # Build namespace
-        ns = Dict{Symbol, Any}(
-            :g => g_tensor,
-            :ig => ig_tensor,
-            :Γ => Γ_tensor,
-            :Gamma => Γ_tensor,
-            :R => R_tensor,
-            :Ric => Ric_tensor,
-            :G => G_tensor
-        )
+            # Build namespace
+            ns = Dict{Symbol, Any}(
+                :g => g_tensor,
+                :ig => ig_tensor,
+                :Γ => Γ_tensor,
+                :Gamma => Γ_tensor,
+                :R => R_tensor,
+                :Ric => Ric_tensor,
+                :G => G_tensor
+            )
 
-        # Add custom tensors (like vectors)
-        for (name_str, val_arr) in custom_vectors
-            name_sym = Symbol(name_str)
-            if val_arr isa AbstractDict
-                # Detailed custom tensor/vector
-                type_str = get(val_arr, "type", "vector")
-                indices_raw = get(val_arr, "indices", [])
-                data_raw = get(val_arr, "data", [])
-                
-                idx_symbols = [:μ, :ν, :ρ, :σ]
-                indices_list = TensorIndex[]
-                for (i, is_contra) in enumerate(indices_raw)
-                    sym = i <= length(idx_symbols) ? idx_symbols[i] : Symbol("index_$i")
-                    is_c = (is_contra === true || is_contra == "upper" || is_contra == "contravariant")
-                    push!(indices_list, TensorIndex(sym, is_c))
-                end
-                
-                # General Rank N tensor support!
-                rank = length(indices_list)
-                if rank < 1
-                    rank = 1
-                end
-                
-                flat_data = Float64.(collect(data_raw))
-                expected_len = 4^rank
-                
-                if length(flat_data) != expected_len
-                    # Safe padding or truncating if user inputs are incomplete
-                    actual_len = length(flat_data)
-                    if actual_len < expected_len
-                        append!(flat_data, zeros(Float64, expected_len - actual_len))
+            # Add custom tensors (like vectors)
+            for (name_str, val_arr) in custom_vectors
+                name_sym = Symbol(name_str)
+                if val_arr isa AbstractDict
+                    # Detailed custom tensor/vector
+                    type_str = get(val_arr, "type", "vector")
+                    indices_raw = get(val_arr, "indices", [])
+                    data_raw = get(val_arr, "data", [])
+                    
+                    idx_symbols = [:μ, :ν, :ρ, :σ]
+                    indices_list = TensorIndex[]
+                    for (i, is_contra) in enumerate(indices_raw)
+                        sym = i <= length(idx_symbols) ? idx_symbols[i] : Symbol("index_$i")
+                        is_c = (is_contra === true || is_contra == "upper" || is_contra == "contravariant")
+                        push!(indices_list, TensorIndex(sym, is_c))
+                    end
+                    
+                    # General Rank N tensor support!
+                    rank = length(indices_list)
+                    if rank < 1
+                        rank = 1
+                    end
+                    
+                    flat_data = Float64.(collect(data_raw))
+                    expected_len = 4^rank
+                    
+                    if length(flat_data) != expected_len
+                        # Safe padding or truncating if user inputs are incomplete
+                        actual_len = length(flat_data)
+                        if actual_len < expected_len
+                            append!(flat_data, zeros(Float64, expected_len - actual_len))
+                        else
+                            flat_data = flat_data[1:expected_len]
+                        end
+                    end
+                    
+                    if rank == 1
+                        ns[name_sym] = Tensor(flat_data, indices_list, name_sym)
                     else
-                        flat_data = flat_data[1:expected_len]
+                        # Reshape row-major flat data to N-dimensional Julia array.
+                        rev_shape = Tuple(fill(4, rank))
+                        temp_arr = reshape(flat_data, rev_shape...)
+                        arr_data = permutedims(temp_arr, Tuple(reverse(1:rank)))
+                        ns[name_sym] = Tensor(arr_data, indices_list, name_sym)
+                    end
+                else
+                    # Fallback to simple array format
+                    arr_data = Float64.(val_arr)
+                    if ndims(arr_data) == 1
+                        ns[name_sym] = Tensor(arr_data, [upper(:μ)], name_sym)
+                    elseif ndims(arr_data) == 2
+                        ns[name_sym] = Tensor(arr_data, [upper(:μ), upper(:ν)], name_sym)
                     end
                 end
-                
-                if rank == 1
-                    ns[name_sym] = Tensor(flat_data, indices_list, name_sym)
-                else
-                    # Reshape row-major flat data to N-dimensional Julia array.
-                    # Reshape to reversed dimensions first, then permute back to reverse.
-                    # This maps row-major flat data directly to column-major Julia layout.
-                    rev_shape = Tuple(fill(4, rank))
-                    temp_arr = reshape(flat_data, rev_shape...)
-                    arr_data = permutedims(temp_arr, Tuple(reverse(1:rank)))
-                    ns[name_sym] = Tensor(arr_data, indices_list, name_sym)
-                end
+            end
+
+            # Calculate expression
+            local result_tensor
+            if contains(expr, '=')
+                result_tensor = tensor_assign(expr, ns)
             else
-                # Fallback to simple array format
-                arr_data = Float64.(val_arr)
-                if ndims(arr_data) == 1
-                    ns[name_sym] = Tensor(arr_data, [upper(:μ)], name_sym)
-                elseif ndims(arr_data) == 2
-                    ns[name_sym] = Tensor(arr_data, [upper(:μ), upper(:ν)], name_sym)
+                result_tensor = tensor_expr(expr, ns)
+            end
+
+            # LaTeX formats
+            res_lhs, res_rhs, res_comps = to_latex(result_tensor; coords=coord_names)
+
+            # Base workspace tensors
+            workspace_tensors = Dict{String, Any}()
+            for (k, t) in ns
+                name_str = string(k)
+                if name_str == "Gamma"
+                    continue
                 end
+                lhs, rhs, comps = to_latex(t; coords=coord_names)
+                workspace_tensors[name_str] = Dict(
+                    "lhs" => lhs,
+                    "rhs" => rhs,
+                    "components" => comps,
+                    "data" => t.data,
+                    "indices" => [Dict("name" => string(idx.name), "is_contravariant" => idx.is_contravariant) for idx in t.indices]
+                )
             end
-        end
 
-        # Calculate expression
-        local result_tensor
-        if contains(expr, '=')
-            result_tensor = tensor_assign(expr, ns)
-        else
-            result_tensor = tensor_expr(expr, ns)
-        end
-
-        # LaTeX formats
-        res_lhs, res_rhs, res_comps = to_latex(result_tensor; coords=coord_names)
-
-        # Base workspace tensors
-        workspace_tensors = Dict{String, Any}()
-        for (k, t) in ns
-            name_str = string(k)
-            if name_str == "Gamma"
-                continue
-            end
-            lhs, rhs, comps = to_latex(t; coords=coord_names)
-            workspace_tensors[name_str] = Dict(
-                "lhs" => lhs,
-                "rhs" => rhs,
-                "components" => comps,
-                "data" => t.data,
-                "indices" => [Dict("name" => string(idx.name), "is_contravariant" => idx.is_contravariant) for idx in t.indices]
+            response = Dict(
+                "success" => true,
+                "latex_lhs" => res_lhs,
+                "latex_rhs" => res_rhs,
+                "components_latex" => res_comps,
+                "name" => string(result_tensor.name),
+                "data" => result_tensor.data,
+                "indices" => [Dict("name" => string(idx.name), "is_contravariant" => idx.is_contravariant) for idx in result_tensor.indices],
+                "workspace_tensors" => workspace_tensors,
+                "warnings" => captured_warnings
             )
-        end
-
-        response = Dict(
-            "success" => true,
-            "latex_lhs" => res_lhs,
-            "latex_rhs" => res_rhs,
-            "components_latex" => res_comps,
-            "name" => string(result_tensor.name),
-            "data" => result_tensor.data,
-            "indices" => [Dict("name" => string(idx.name), "is_contravariant" => idx.is_contravariant) for idx in result_tensor.indices],
-            "workspace_tensors" => workspace_tensors
-        )
+        end # with_logger
 
         return HTTP.Response(200, 
             ["Content-Type" => "application/json", "Access-Control-Allow-Origin" => "*"], 
@@ -234,7 +253,8 @@ function handle_compute(req::HTTP.Request)
         @warn "Computation failed: $e"
         response = Dict(
             "success" => false,
-            "error" => string(e)
+            "error" => string(e),
+            "warnings" => captured_warnings
         )
         return HTTP.Response(400, 
             ["Content-Type" => "application/json", "Access-Control-Allow-Origin" => "*"], 

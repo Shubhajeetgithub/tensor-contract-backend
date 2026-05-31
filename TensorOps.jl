@@ -251,8 +251,22 @@ function parse_tensor_term(term::Union{String, SubString}, namespace::Dict)
     if !haskey(namespace, name)
         error("Tensor '$name' not found in namespace")
     end
-    indices = parse_tensor_indices(index_str)
-    return namespace[name], indices
+    original_tensor = namespace[name]
+    parsed_indices = parse_tensor_indices(index_str)
+    if length(parsed_indices) != length(original_tensor.indices)
+        error("Rank mismatch: Tensor '$name' expects $(length(original_tensor.indices)) indices, but $(length(parsed_indices)) were provided.")
+    end
+    for i in 1:length(parsed_indices)
+        is_parsed_contra = parsed_indices[i].is_contravariant
+        is_orig_contra = original_tensor.indices[i].is_contravariant
+        if is_parsed_contra != is_orig_contra
+            orig_pos = is_orig_contra ? "upper (contravariant)" : "lower (covariant)"
+            parsed_pos = is_parsed_contra ? "upper" : "lower"
+            @warn "Index position mismatch for tensor '$name' at slot $i. " *
+                  "It was defined with a $orig_pos index, but is being used with a $parsed_pos index in the expression."
+        end
+    end
+    return original_tensor, parsed_indices
 end
 
 # Split an expression string into space-delimited terms, respecting { } nesting.
