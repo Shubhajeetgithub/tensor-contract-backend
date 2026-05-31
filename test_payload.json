@@ -1,0 +1,14 @@
+{
+  "metric": "schwarzschild",
+  "params": {"M": 1.0},
+  "coords": [0.0, 6.0, 1.570796, 0.0],
+  "coord_names": ["t", "r", "\\theta", "\\phi"],
+  "expression": "v_ν = g{_μ _ν} v{^μ}",
+  "vectors": {
+    "v": {
+      "type": "vector",
+      "indices": [true],
+      "data": [1.0, 2.0, 1.0, 3.0]
+    }
+  }
+}
