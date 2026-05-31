@@ -1,5 +1,9 @@
 FROM julia:1.12.6-bookworm
 
+# Prevent out-of-memory errors and optimize build on resource-constrained containers (like Render Free tier)
+ENV JULIA_NUM_PRECOMPILE_TASKS=1
+ENV JULIA_CPU_TARGET="generic"
+
 WORKDIR /app
 
 # Copy the package environment specification
